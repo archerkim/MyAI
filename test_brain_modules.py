@@ -264,6 +264,24 @@ class TestFOLExtensions(unittest.TestCase):
              ("stove", "has_property", "hot"), ("stove", "has_property", "cold")])}
         self.assertIn("opposite_properties", kinds)
 
+    def test_sanitize_drops_cycle_keeps_first(self):
+        from reasoner import sanitize
+        # force is_a pressure (принято), pressure is_a force (замкнёт цикл → drop)
+        clean, dropped = sanitize([("force", "is_a", "pressure"),
+                                   ("pressure", "is_a", "force"),
+                                   ("a", "part_of", "a")])
+        self.assertIn(("force", "is_a", "pressure"), clean)
+        self.assertNotIn(("pressure", "is_a", "force"), clean)  # цикл отброшен
+        reasons = {r for _, r in dropped}
+        self.assertIn("cycle[is_a]", reasons)
+        self.assertIn("self_reference[part_of]", reasons)
+
+    def test_sanitize_preserves_duplicates(self):
+        from reasoner import sanitize
+        # повторный факт усиливает проводимость — не должен отбрасываться
+        clean, _ = sanitize([("x", "causes", "y"), ("x", "causes", "y")])
+        self.assertEqual(clean.count(("x", "causes", "y")), 2)
+
 
 class TestStructuralPredictor(unittest.TestCase):
     """Аналогия по структуре + подтверждение перед материализацией."""

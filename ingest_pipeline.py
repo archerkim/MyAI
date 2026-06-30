@@ -149,7 +149,7 @@ def _chunk_text(paragraphs, max_chars=DEFAULT_MAX_CHARS):
 
 def ingest_document(path, out_path, module_id=1, model=DEFAULT_MODEL,
                     max_chars=DEFAULT_MAX_CHARS, strict=True, memory=True,
-                    clean=False):
+                    clean=False, validate=True):
     """Полный пайплайн: документ → чанки → триплеты → .brain-модуль.
 
     memory=True (деф.) использует StreamingExtractor: память протягивает
@@ -202,6 +202,20 @@ def ingest_document(path, out_path, module_id=1, model=DEFAULT_MODEL,
 
     if not all_triples:
         raise ValueError("ни одного триплета не извлечено — модуль не собран")
+
+    if validate:
+        # логическая санитизация: не пускаем в граф рёбра, замыкающие is_a/part_of
+        # цикл, самоссылки и прямые противоречия opposite_of (см. reasoner.sanitize)
+        from collections import Counter
+        from reasoner import sanitize
+        tuples = [(t["subject"], t["relation"], t["object"]) for t in all_triples]
+        clean, dropped = sanitize(tuples)
+        if dropped:
+            reasons = dict(Counter(r for _, r in dropped))
+            print(f"[2.5/4] логическая валидация: отброшено {len(dropped)} рёбер {reasons}")
+            for tri, reason in dropped[:5]:
+                print(f"        ✗ ({tri[0]}) --{tri[1]}--> ({tri[2]})  [{reason}]")
+        all_triples = [{"subject": s, "relation": r, "object": o} for (s, r, o) in clean]
 
     print(f"[3/4] сборка модуля: {len(all_triples)} триплет(ов) "
           f"→ {out_path} (module_id={module_id})")
@@ -266,6 +280,9 @@ def main(argv=None):
     parser.add_argument("--clean", action="store_true",
                         help="отбросить boilerplate (js/browser/feedback/nav) до ингеста "
                              "через clean_document.is_boilerplate")
+    parser.add_argument("--no-validate", action="store_true",
+                        help="не отбрасывать логически противоречивые рёбра "
+                             "(is_a/part_of циклы, самоссылки, opposite_of-противоречия)")
     parser.add_argument("--mount", action="store_true",
                         help="после сборки смонтировать модуль в свежий мозг и показать stats")
     args = parser.parse_args(argv)
@@ -287,6 +304,7 @@ def main(argv=None):
             strict=not args.no_strict,
             memory=not args.no_memory,
             clean=args.clean,
+            validate=not args.no_validate,
         )
     except (ValueError, RuntimeError) as e:
         print(f"[error] {e}", file=sys.stderr)

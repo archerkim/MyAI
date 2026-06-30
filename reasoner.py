@@ -280,6 +280,55 @@ def find_contradictions(facts):
     return issues
 
 
+def sanitize(triples):
+    """Отбрасывает рёбра, нарушающие логическую согласованность, ДО добавления в
+    граф. Инкрементально держит is_a/part_of ацикличными (DAG) и не допускает
+    прямых противоречий opposite_of. Возвращает (clean, dropped):
+      clean   — список допущенных троек (порядок сохранён);
+      dropped — список (тройка, причина).
+
+    Порядок входа важен: при конфликте побеждает РАНЕЕ принятое ребро.
+    """
+    clean, dropped = [], []
+    accepted = set()
+    hier = {"is_a": {}, "part_of": {}}   # инкрементальные adjacency для DAG-проверки
+    opp = set()                          # frozenset({s,o}) для opposite_of
+
+    def reachable(adj, src, dst):
+        """Достижим ли dst из src в adj (есть ли уже путь dst..src — тогда новое
+        ребро src->dst замкнёт цикл)."""
+        stack, seen = [src], set()
+        while stack:
+            x = stack.pop()
+            if x == dst:
+                return True
+            if x in seen:
+                continue
+            seen.add(x)
+            stack.extend(adj.get(x, ()))
+        return False
+
+    for (s, r, o) in triples:
+        if s == o and r in ("is_a", "part_of", "causes"):
+            dropped.append(((s, r, o), f"self_reference[{r}]")); continue
+        if r in ("is_a", "part_of"):
+            if reachable(hier[r], o, s):      # путь o..s уже есть → s->o замкнёт цикл
+                dropped.append(((s, r, o), f"cycle[{r}]")); continue
+        if r == "is_a" and frozenset((s, o)) in opp:
+            dropped.append(((s, r, o), "is_a_vs_opposite")); continue
+        if r == "opposite_of" and (s, "is_a", o) in accepted:
+            dropped.append(((s, r, o), "opposite_vs_is_a")); continue
+
+        # ребро принято — обновляем структуры
+        if r in ("is_a", "part_of"):
+            hier[r].setdefault(s, set()).add(o)
+        if r == "opposite_of":
+            opp.add(frozenset((s, o)))
+        clean.append((s, r, o)); accepted.add((s, r, o))
+
+    return clean, dropped
+
+
 class GraphReasoner:
     """Применяет FOL-вывод к смонтированному графу и материализует результат."""
 
