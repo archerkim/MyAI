@@ -104,6 +104,22 @@ typedef enum DependencyType {
     DEP_LOGIC_CAUSES,
     DEP_LOGIC_IMPLIES,
 
+    // --- Semantic relation vocabulary (нейро-символический ингест) ---
+    // Эти типы заполняет LLM-экстрактор триплетов (см. extractor.py + RELATION_TYPE_MAP).
+    // Значения начинаются со 100, чтобы не пересекаться с синтаксическим диапазоном.
+    REL_IS_A = 100,       // X является разновидностью Y (taxonomy)
+    REL_PART_OF,          // X — часть Y (meronymy)
+    REL_HAS_PROPERTY,     // X обладает свойством Y
+    REL_CAUSES,           // X вызывает Y
+    REL_REQUIRES,         // X требует Y
+    REL_ENABLES,          // X делает возможным Y
+    REL_USED_FOR,         // X используется для Y
+    REL_DEFINED_AS,       // X определяется как Y
+    REL_MEASURED_IN,      // X измеряется в Y
+    REL_EXAMPLE_OF,       // X — пример Y
+    REL_OPPOSITE_OF,      // X противоположно Y
+    REL_RELATED_TO,       // X связано с Y (общая связь)
+
     // Sentinel value to know the total count if needed
     DEP_COUNT
 
@@ -115,6 +131,7 @@ typedef struct Edge {
     DependencyType dep_type;
     uint64_t last_activated_op_count;
     uint32_t repetition_counter;
+    uint16_t module_id; // provenance: из какого модуля знаний пришло ребро (0 = ядро)
 } Edge;
 
 typedef struct Node {
@@ -135,6 +152,7 @@ typedef struct Graph {
 
     Node* node_lookup_table;
     uint64_t global_op_counter;
+    uint16_t current_module_id; // тег, которым помечаются новые рёбра при ингесте
 } Graph;
 
 // input structure for a single token from python
@@ -159,10 +177,11 @@ typedef struct EdgeInfo {
     uint32_t to_id;
     DependencyType dep_type;
     float conductance;
+    uint16_t module_id;
 } EdgeInfo;
 
 uint32_t get_or_create_node(Graph* graph, const char* lemma);
-void add_or_update_edge(Node* from_node, uint32_t to_id, DependencyType type, uint64_t op_counter);
+void add_or_update_edge(Node* from_node, uint32_t to_id, DependencyType type, uint64_t op_counter, uint16_t module_id);
 
 // --- public api functions (for ffi) ---
 
@@ -183,6 +202,7 @@ BrainHandle brain_create() {
     graph->node_count = 0;
     graph->node_lookup_table = NULL;
     graph->global_op_counter = 0;
+    graph->current_module_id = 0;
 
     printf("[brain_core] new brain created.\n");
     return (BrainHandle)graph;
@@ -227,7 +247,7 @@ int brain_ingest_sentence(BrainHandle handle, const ParsedToken* sentence, size_
 
                 // dependency points from child to head
                 Node* child_node = &graph->nodes[child_id];
-                add_or_update_edge(child_node, head_id, sentence[i].dep_type, graph->global_op_counter);
+                add_or_update_edge(child_node, head_id, sentence[i].dep_type, graph->global_op_counter, graph->current_module_id);
 
                 // optionally add a reverse edge with a different type if needed
                 // for now, we keep it directional to represent the dependency tree
@@ -278,10 +298,15 @@ uint32_t get_or_create_node(Graph* graph, const char* lemma) {
     return new_id;
 }
 
-void add_or_update_edge(Node* from_node, uint32_t to_id, DependencyType type, uint64_t op_counter) {
-    // check if edge to `to_id` with the same type already exists
+void add_or_update_edge(Node* from_node, uint32_t to_id, DependencyType type, uint64_t op_counter, uint16_t module_id) {
+    // Ребро принадлежит модулю: ключ дедупликации включает module_id.
+    // Это значит, что одинаковый факт из РАЗНЫХ модулей хранится как
+    // отдельные рёбра — каждый модуль можно снять (unmount) независимо.
+    // Повтор факта ВНУТРИ одного модуля по-прежнему накапливает проводимость.
     for (uint32_t i = 0; i < from_node->edge_count; ++i) {
-        if (from_node->edges[i].to_node_id == to_id && from_node->edges[i].dep_type == type) {
+        if (from_node->edges[i].to_node_id == to_id &&
+            from_node->edges[i].dep_type == type &&
+            from_node->edges[i].module_id == module_id) {
             float increment = CONDUCTANCE_INCREMENT / (1.0f + from_node->edges[i].conductance);
             from_node->edges[i].conductance += increment;
             from_node->edges[i].repetition_counter++;
@@ -307,8 +332,32 @@ void add_or_update_edge(Node* from_node, uint32_t to_id, DependencyType type, ui
     new_edge->conductance = CONDUCTANCE_INCREMENT;
     new_edge->repetition_counter = 1;
     new_edge->last_activated_op_count = op_counter;
+    new_edge->module_id = module_id;
 
     from_node->edge_count++;
+}
+
+// устанавливает тег модуля для последующих операций ингеста.
+void brain_set_module_id(BrainHandle handle, uint16_t module_id) {
+    if (!handle) return;
+    ((Graph*)handle)->current_module_id = module_id;
+}
+
+// нейро-символический ингест: добавляет один семантический триплет
+// (subject) --rel--> (object). узлы создаются по канонической лемме-концепту.
+// ребро помечается текущим module_id. возвращает 0 при успехе.
+int brain_add_triple(BrainHandle handle, const char* subject,
+                     DependencyType rel, const char* object) {
+    if (!handle || !subject || !object) return -1;
+    Graph* graph = (Graph*)handle;
+
+    graph->global_op_counter++;
+    uint32_t subj_id = get_or_create_node(graph, subject);
+    uint32_t obj_id  = get_or_create_node(graph, object);
+
+    add_or_update_edge(&graph->nodes[subj_id], obj_id, rel,
+                       graph->global_op_counter, graph->current_module_id);
+    return 0;
 }
 
 GraphStats brain_get_stats(BrainHandle handle) {
@@ -332,85 +381,73 @@ int32_t brain_get_node_id(BrainHandle handle, const char* lemma) {
 }
 
 // вспомогательная функция для печати (не часть public api)
+// этот switch должен быть синхронизирован с enum DependencyType и
+// с DEP_TYPE_MAP в brain_core_wrapper_local.py
 const char* dep_type_to_string(DependencyType type) {
-    // этот switch должен быть синхронизирован с enum
     switch(type) {
-        case DEP_NSUBJ: return "NSUBJ";
-        case DEP_AMOD: return "AMOD";
-        case DEP_ROOT: return "ROOT";
-        case DEP_NSUBJ: return "NSUBJ";
-    DEP_DOBJ: return "";
-    DEP_IOBJ: return "";
-    DEP_CSUBJ: return "";
-    DEP_CCOMP: return "";
-    DEP_XCOMP: return "";
-    // --- Nominal Dependents ---
-    DEP_OBL: return "";
-    DEP_VOCATIVE: return "";
-    DEP_EXPL: return "";
-    DEP_DISLOCATED: return "";
-    DEP_NMOD: return "";
-    DEP_APPOS,       // Appositional modifier
-    DEP_NUMMOD,      // Numeric modifier
-
-    // --- Non-core Dependents ---
-    DEP_ADVCL,       // Adverbial clause modifier
-    DEP_ADVMOD,      // Adverbial modifier
-    DEP_DISCOURSE,   // Discourse element
-
-    // --- Compounding and Unclassified ---
-    DEP_COMPOUND,    // Compound
-    DEP_FIXED,       // Fixed multiword expression
-    DEP_FLAT,        // Flat multiword expression
-    DEP_GOESWITH,    // Goes with
-
-    // --- Case and Prepositions ---
-    DEP_CASE,        // Case marker
-    DEP_ACL,         // Adjectival clause
-    DEP_AMOD,        // Adjectival modifier
-
-    // --- Coordination and Auxiliaries ---
-    DEP_AUX,         // Auxiliary
-    DEP_COP,         // Copula
-    DEP_CONJ,        // Conjunct
-    DEP_CC,          // Coordinating conjunction
-
-    // --- Punctuation and Determiners ---
-    DEP_DET,         // Determiner
-    DEP_MARK,        // Marker
-    DEP_PUNCT,       // Punctuation
-
-    // --- Special Relations (often from specific parsers) ---
-    DEP_AGENT,       // Agent (semantic role)
-    DEP_ATTR,        // Attribute
-    DEP_DATIVE,      // Dative
-    DEP_OPRD,        // Object predicate
-    DEP_PREDET,      // Predeterminer
-    DEP_PREP,        // Prepositional modifier
-
-    // --- Relations for passives and relatives ---
-    DEP_NSUBJPASS,   // Passive nominal subject
-    DEP_CSUBJPASS,   // Passive clausal subject
-    DEP_RELCL,       // Relative clause modifier
-
-    // --- Other common ones from spaCy's English model ---
-    DEP_PRT,         // Particle (e.g., "put UP the book")
-    DEP_INTJ,        // Interjection
-    DEP_META,        // Meta modifier
-    DEP_NEG,         // Negation modifier
-    DEP_POSS,        // Possession modifier
-    DEP_PCOMP,       // Prepositional complement
-    DEP_QUANTMOD,    // Quantifier phrase modifier
-
-    // --- Our Custom Types (for future expansion) ---
-    DEP_MATH_EQUALS,
-    DEP_MATH_OPERAND,
-    DEP_LOGIC_CAUSES,
-    DEP_LOGIC_IMPLIES,
-
-    // Sentinel value to know the total count if needed
-    DEP_COUNT
-        // ... добавь другие по мере необходимости
+        case DEP_ROOT:       return "ROOT";
+        case DEP_NSUBJ:      return "nsubj";
+        case DEP_DOBJ:       return "dobj";
+        case DEP_IOBJ:       return "iobj";
+        case DEP_CSUBJ:      return "csubj";
+        case DEP_CCOMP:      return "ccomp";
+        case DEP_XCOMP:      return "xcomp";
+        case DEP_OBL:        return "obl";
+        case DEP_VOCATIVE:   return "vocative";
+        case DEP_EXPL:       return "expl";
+        case DEP_DISLOCATED: return "dislocated";
+        case DEP_NMOD:       return "nmod";
+        case DEP_APPOS:      return "appos";
+        case DEP_NUMMOD:     return "nummod";
+        case DEP_ADVCL:      return "advcl";
+        case DEP_ADVMOD:     return "advmod";
+        case DEP_DISCOURSE:  return "discourse";
+        case DEP_COMPOUND:   return "compound";
+        case DEP_FIXED:      return "fixed";
+        case DEP_FLAT:       return "flat";
+        case DEP_GOESWITH:   return "goeswith";
+        case DEP_CASE:       return "case";
+        case DEP_ACL:        return "acl";
+        case DEP_AMOD:       return "amod";
+        case DEP_AUX:        return "aux";
+        case DEP_COP:        return "cop";
+        case DEP_CONJ:       return "conj";
+        case DEP_CC:         return "cc";
+        case DEP_DET:        return "det";
+        case DEP_MARK:       return "mark";
+        case DEP_PUNCT:      return "punct";
+        case DEP_AGENT:      return "agent";
+        case DEP_ATTR:       return "attr";
+        case DEP_DATIVE:     return "dative";
+        case DEP_OPRD:       return "oprd";
+        case DEP_PREDET:     return "predet";
+        case DEP_PREP:       return "prep";
+        case DEP_NSUBJPASS:  return "nsubjpass";
+        case DEP_CSUBJPASS:  return "csubjpass";
+        case DEP_RELCL:      return "relcl";
+        case DEP_PRT:        return "prt";
+        case DEP_INTJ:       return "intj";
+        case DEP_META:       return "meta";
+        case DEP_NEG:        return "neg";
+        case DEP_POSS:       return "poss";
+        case DEP_PCOMP:      return "pcomp";
+        case DEP_QUANTMOD:   return "quantmod";
+        case DEP_MATH_EQUALS:  return "math_equals";
+        case DEP_MATH_OPERAND: return "math_operand";
+        case DEP_LOGIC_CAUSES: return "logic_causes";
+        case DEP_LOGIC_IMPLIES:return "logic_implies";
+        case REL_IS_A:         return "is_a";
+        case REL_PART_OF:      return "part_of";
+        case REL_HAS_PROPERTY: return "has_property";
+        case REL_CAUSES:       return "causes";
+        case REL_REQUIRES:     return "requires";
+        case REL_ENABLES:      return "enables";
+        case REL_USED_FOR:     return "used_for";
+        case REL_DEFINED_AS:   return "defined_as";
+        case REL_MEASURED_IN:  return "measured_in";
+        case REL_EXAMPLE_OF:   return "example_of";
+        case REL_OPPOSITE_OF:  return "opposite_of";
+        case REL_RELATED_TO:   return "related_to";
         default: return "UNKNOWN";
     }
 }
@@ -434,7 +471,6 @@ int brain_set_activation(BrainHandle handle, uint32_t node_id, float value) {
 
 int brain_spread_activation_step(BrainHandle handle, const uint32_t* anchor_ids, size_t num_anchors) {
     if (!handle) return -1;
-    printf("Spreading activation");
     Graph* graph = (Graph*)handle;
     float* next_activations = (float*)calloc(graph->node_count, sizeof(float));
     if (!next_activations) return -2;
@@ -565,7 +601,7 @@ size_t brain_get_significant_nodes(BrainHandle handle, size_t max_results_size, 
     }
 
     free(active_nodes);
-    return active_count;
+    return num_to_copy;
 }
 
 size_t brain_get_subgraph_edges(BrainHandle handle,
@@ -602,6 +638,7 @@ size_t brain_get_subgraph_edges(BrainHandle handle,
                     results[edge_count].to_id = edge->to_node_id;
                     results[edge_count].dep_type = edge->dep_type;
                     results[edge_count].conductance = edge->conductance;
+                    results[edge_count].module_id = edge->module_id;
                     edge_count++;
                 } else {
                     // буфер результатов переполнен, выходим
@@ -613,6 +650,247 @@ size_t brain_get_subgraph_edges(BrainHandle handle,
     }
     free(is_significant);
     return edge_count;
+}
+
+// --- персистентность (сериализация модулей знаний) ---
+//
+// бинарный формат файла модуля ".brain":
+//   [magic   : 4 bytes = "BRN1"]
+//   [version : uint32]
+//   [node_count : uint32]
+//   [edge_total : uint64]
+//   node section (в порядке id 0..node_count-1):
+//     [lemma_len : uint32][lemma bytes (без \0)]
+//   edge section:
+//     [from_id : uint32][to_id : uint32][dep_type : uint32]
+//     [conductance : float][repetition_counter : uint32][module_id : uint16]
+
+#define BRAIN_FILE_MAGIC "BRN1"
+#define BRAIN_FILE_VERSION 1u
+#define BRAIN_MAX_LEMMA_LEN 4096u // санитарный предел длины леммы при загрузке (защита от битого файла)
+
+// сырое добавление ребра с точными значениями (для load, без аккумуляции проводимости)
+static void append_edge_raw(Node* from_node, uint32_t to_id, DependencyType type,
+                            float conductance, uint32_t reps, uint16_t module_id) {
+    if (from_node->edge_count >= from_node->edge_capacity) {
+        from_node->edge_capacity = (from_node->edge_capacity == 0) ? 8 : from_node->edge_capacity * 2;
+        Edge* p = (Edge*)realloc(from_node->edges, sizeof(Edge) * from_node->edge_capacity);
+        if (!p) { perror("realloc edges (load)"); exit(EXIT_FAILURE); }
+        from_node->edges = p;
+    }
+    Edge* e = &from_node->edges[from_node->edge_count++];
+    e->to_node_id = to_id;
+    e->dep_type = type;
+    e->conductance = conductance;
+    e->repetition_counter = reps;
+    e->last_activated_op_count = 0;
+    e->module_id = module_id;
+}
+
+// сохраняет весь текущий граф в файл. возвращает 0 при успехе.
+int brain_save(BrainHandle handle, const char* path) {
+    if (!handle || !path) return -1;
+    Graph* graph = (Graph*)handle;
+
+    FILE* f = fopen(path, "wb");
+    if (!f) { perror("fopen (save)"); return -2; }
+
+    uint64_t edge_total = 0;
+    for (uint32_t i = 0; i < graph->node_count; ++i) edge_total += graph->nodes[i].edge_count;
+
+    uint32_t version = BRAIN_FILE_VERSION;
+    if (fwrite(BRAIN_FILE_MAGIC, 1, 4, f) != 4) goto write_err;
+    if (fwrite(&version, sizeof(version), 1, f) != 1) goto write_err;
+    if (fwrite(&graph->node_count, sizeof(graph->node_count), 1, f) != 1) goto write_err;
+    if (fwrite(&edge_total, sizeof(edge_total), 1, f) != 1) goto write_err;
+
+    // node section
+    for (uint32_t i = 0; i < graph->node_count; ++i) {
+        Node* n = &graph->nodes[i];
+        uint32_t len = (uint32_t)strlen(n->lemma);
+        if (fwrite(&len, sizeof(len), 1, f) != 1) goto write_err;
+        if (len && fwrite(n->lemma, 1, len, f) != len) goto write_err;
+    }
+
+    // edge section
+    for (uint32_t i = 0; i < graph->node_count; ++i) {
+        Node* n = &graph->nodes[i];
+        for (uint32_t j = 0; j < n->edge_count; ++j) {
+            Edge* e = &n->edges[j];
+            uint32_t from_id = i;
+            uint32_t dep = (uint32_t)e->dep_type;
+            if (fwrite(&from_id, sizeof(from_id), 1, f) != 1) goto write_err;
+            if (fwrite(&e->to_node_id, sizeof(e->to_node_id), 1, f) != 1) goto write_err;
+            if (fwrite(&dep, sizeof(dep), 1, f) != 1) goto write_err;
+            if (fwrite(&e->conductance, sizeof(e->conductance), 1, f) != 1) goto write_err;
+            if (fwrite(&e->repetition_counter, sizeof(e->repetition_counter), 1, f) != 1) goto write_err;
+            if (fwrite(&e->module_id, sizeof(e->module_id), 1, f) != 1) goto write_err;
+        }
+    }
+
+    fclose(f);
+    printf("[brain_core] saved %u nodes, %llu edges -> %s\n",
+           graph->node_count, (unsigned long long)edge_total, path);
+    return 0;
+
+write_err:
+    perror("fwrite (save)");
+    fclose(f);
+    return -3;
+}
+
+// читает заголовок + node section, создавая узлы и возвращая массив
+// "локальный id модуля -> id в целевом графе". вызывающий освобождает мапу.
+// возвращает node_count модуля, либо 0 при ошибке (мапа = NULL).
+static uint32_t read_header_and_nodes(Graph* graph, FILE* f, uint32_t** out_map, uint64_t* out_edge_total) {
+    char magic[4];
+    uint32_t version = 0, node_count = 0;
+    uint64_t edge_total = 0;
+    *out_map = NULL;
+
+    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, BRAIN_FILE_MAGIC, 4) != 0) {
+        fprintf(stderr, "[brain_core] bad magic / not a .brain file\n");
+        return 0;
+    }
+    if (fread(&version, sizeof(version), 1, f) != 1 || version != BRAIN_FILE_VERSION) {
+        fprintf(stderr, "[brain_core] unsupported file version: %u\n", version);
+        return 0;
+    }
+    if (fread(&node_count, sizeof(node_count), 1, f) != 1) return 0;
+    if (fread(&edge_total, sizeof(edge_total), 1, f) != 1) return 0;
+
+    uint32_t* map = (uint32_t*)malloc(sizeof(uint32_t) * (node_count ? node_count : 1));
+    if (!map) { perror("malloc id map"); return 0; }
+
+    for (uint32_t i = 0; i < node_count; ++i) {
+        uint32_t len = 0;
+        if (fread(&len, sizeof(len), 1, f) != 1) { free(map); return 0; }
+        if (len > BRAIN_MAX_LEMMA_LEN) { // битый/враждебный файл: не доверяем длине
+            fprintf(stderr, "[brain_core] lemma length %u exceeds limit %u\n", len, BRAIN_MAX_LEMMA_LEN);
+            free(map); return 0;
+        }
+        char* lemma = (char*)malloc(len + 1);
+        if (!lemma) { perror("malloc lemma"); free(map); return 0; }
+        if (len && fread(lemma, 1, len, f) != len) { free(lemma); free(map); return 0; }
+        lemma[len] = '\0';
+        map[i] = get_or_create_node(graph, lemma); // ключ — лемма (клей между модулями)
+        free(lemma);
+    }
+
+    *out_map = map;
+    *out_edge_total = edge_total;
+    return node_count;
+}
+
+// загружает файл В ПУСТОЙ граф, восстанавливая точные значения рёбер.
+int brain_load(BrainHandle handle, const char* path) {
+    if (!handle || !path) return -1;
+    Graph* graph = (Graph*)handle;
+
+    FILE* f = fopen(path, "rb");
+    if (!f) { perror("fopen (load)"); return -2; }
+
+    uint32_t* map = NULL;
+    uint64_t edge_total = 0;
+    uint32_t node_count = read_header_and_nodes(graph, f, &map, &edge_total);
+    if (!map) { fclose(f); return -3; }
+
+    for (uint64_t k = 0; k < edge_total; ++k) {
+        uint32_t from_id, to_id, dep, reps;
+        float cond; uint16_t module_id;
+        if (fread(&from_id, sizeof(from_id), 1, f) != 1 ||
+            fread(&to_id,   sizeof(to_id),   1, f) != 1 ||
+            fread(&dep,     sizeof(dep),     1, f) != 1 ||
+            fread(&cond,    sizeof(cond),    1, f) != 1 ||
+            fread(&reps,    sizeof(reps),    1, f) != 1 ||
+            fread(&module_id, sizeof(module_id), 1, f) != 1) {
+            free(map); fclose(f); return -4;
+        }
+        if (from_id >= node_count || to_id >= node_count) continue; // защита от битого файла
+        append_edge_raw(&graph->nodes[map[from_id]], map[to_id],
+                        (DependencyType)dep, cond, reps, module_id);
+    }
+
+    free(map);
+    fclose(f);
+    printf("[brain_core] loaded %u nodes, %llu edges from %s\n",
+           node_count, (unsigned long long)edge_total, path);
+    return 0;
+}
+
+// монтирует модуль ПОВЕРХ существующего графа: узлы склеиваются по леммам,
+// рёбра аккумулируются (как при повторном ингесте) и помечаются module_id.
+int brain_merge_from_file(BrainHandle handle, const char* path, uint16_t module_id) {
+    if (!handle || !path) return -1;
+    Graph* graph = (Graph*)handle;
+
+    FILE* f = fopen(path, "rb");
+    if (!f) { perror("fopen (merge)"); return -2; }
+
+    uint32_t* map = NULL;
+    uint64_t edge_total = 0;
+    uint32_t node_count = read_header_and_nodes(graph, f, &map, &edge_total);
+    if (!map) { fclose(f); return -3; }
+
+    graph->global_op_counter++;
+    for (uint64_t k = 0; k < edge_total; ++k) {
+        uint32_t from_id, to_id, dep, reps;
+        float cond; uint16_t file_module_id;
+        if (fread(&from_id, sizeof(from_id), 1, f) != 1 ||
+            fread(&to_id,   sizeof(to_id),   1, f) != 1 ||
+            fread(&dep,     sizeof(dep),     1, f) != 1 ||
+            fread(&cond,    sizeof(cond),    1, f) != 1 ||
+            fread(&reps,    sizeof(reps),    1, f) != 1 ||
+            fread(&file_module_id, sizeof(file_module_id), 1, f) != 1) {
+            free(map); fclose(f); return -4;
+        }
+        if (from_id >= node_count || to_id >= node_count) continue;
+        (void)reps; (void)cond; (void)file_module_id;
+        add_or_update_edge(&graph->nodes[map[from_id]], map[to_id],
+                           (DependencyType)dep, graph->global_op_counter, module_id);
+    }
+
+    free(map);
+    fclose(f);
+    printf("[brain_core] merged module %u (%u nodes) from %s\n",
+           module_id, node_count, path);
+    return 0;
+}
+
+// --- соединение / разъединение модулей ---
+
+// считает, сколько рёбер принадлежит модулю (для статистики/манифеста).
+size_t brain_count_module_edges(BrainHandle handle, uint16_t module_id) {
+    if (!handle) return 0;
+    Graph* graph = (Graph*)handle;
+    size_t count = 0;
+    for (uint32_t i = 0; i < graph->node_count; ++i) {
+        Node* n = &graph->nodes[i];
+        for (uint32_t j = 0; j < n->edge_count; ++j)
+            if (n->edges[j].module_id == module_id) count++;
+    }
+    return count;
+}
+
+// РАЗЪЕДИНЕНИЕ: удаляет все рёбра, принадлежащие модулю, и возвращает их число.
+// Узлы не удаляются (id = индекс массива используется рёбрами); осиротевшие узлы
+// остаются инертными — без исходящих рёбер они не участвуют в распространении
+// активации и переиспользуются при повторном монтировании того же модуля.
+size_t brain_unmount_module(BrainHandle handle, uint16_t module_id) {
+    if (!handle) return 0;
+    Graph* graph = (Graph*)handle;
+    size_t removed = 0;
+    for (uint32_t i = 0; i < graph->node_count; ++i) {
+        Node* n = &graph->nodes[i];
+        uint32_t w = 0; // позиция записи (compaction на месте)
+        for (uint32_t r = 0; r < n->edge_count; ++r) {
+            if (n->edges[r].module_id == module_id) { removed++; continue; }
+            if (w != r) n->edges[w] = n->edges[r];
+            w++;
+        }
+        n->edge_count = w;
+    }
+    return removed;
 }
 
 int main(){
@@ -684,6 +962,31 @@ int main(){
         }
     }
 
+
+    // --- этап 2.5: проверка персистентности (save -> load) ---
+    printf("\n--- testing persistence ---\n");
+    const char* test_path = "/tmp/selftest.brain";
+    brain_save(brain, test_path);
+
+    BrainHandle reloaded = brain_create();
+    brain_load(reloaded, test_path);
+    GraphStats rstats = brain_get_stats(reloaded);
+    printf("[verify] reloaded brain: %u nodes, %llu edges (expected %u / %llu)\n",
+           rstats.node_count, (unsigned long long)rstats.total_edge_count,
+           stats.node_count, (unsigned long long)stats.total_edge_count);
+
+    // проверим, что проводимость восстановилась точно
+    int32_t boy_id = brain_get_node_id(reloaded, "boy");
+    if (boy_id != -1) {
+        Graph* rg = (Graph*)reloaded;
+        Node* boy = &rg->nodes[boy_id];
+        for (uint32_t j = 0; j < boy->edge_count; ++j)
+            printf("[verify] boy --(%s)--> %s | g=%.4f reps=%u\n",
+                   dep_type_to_string(boy->edges[j].dep_type),
+                   rg->nodes[boy->edges[j].to_node_id].lemma,
+                   boy->edges[j].conductance, boy->edges[j].repetition_counter);
+    }
+    brain_free(reloaded);
 
     // --- этап 3: очистка ---
     brain_free(brain);
