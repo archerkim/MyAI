@@ -349,6 +349,12 @@ class TestSynonyms(unittest.TestCase):
         b = normalize_triple(("atom", "has_property", "motion"))
         self.assertEqual(a, b)  # разные формулировки → один факт → корроборация
 
+    def test_build_map_picks_shortest_canon(self):
+        from embed_synonyms import build_map
+        m = build_map([["motion", "moving", "movement"], ["matter", "everything"]])
+        self.assertEqual(m["moving"], "motion")     # канон = самый короткий
+        self.assertEqual(m["everything"], "matter")
+
 
 class TestStructuralPredictor(unittest.TestCase):
     """Аналогия по структуре + подтверждение перед материализацией."""
