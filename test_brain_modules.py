@@ -309,6 +309,27 @@ class TestGraphQuality(unittest.TestCase):
         self.assertLessEqual(rep["composite"], 1.0)
 
 
+class TestCurriculum(unittest.TestCase):
+    """Планировщик должен ставить основы перед зависимым материалом."""
+
+    def test_orders_prerequisites_first(self):
+        from curriculum import schedule
+        # eng использует force (из physics), physics использует vector (из math)
+        profiles = {
+            "eng": {"defines": {"beam"}, "uses": {"beam", "force"}},
+            "physics": {"defines": {"force"}, "uses": {"force", "vector"}},
+            "math": {"defines": {"vector"}, "uses": {"vector"}},
+        }
+        order, _ = schedule(profiles)
+        self.assertEqual(order, ["math", "physics", "eng"])
+
+    def test_independent_docs_terminate(self):
+        from curriculum import schedule
+        order, _ = schedule({"a": {"defines": {"x"}, "uses": {"x"}},
+                             "b": {"defines": {"y"}, "uses": {"y"}}})
+        self.assertEqual(set(order), {"a", "b"})
+
+
 class TestStructuralPredictor(unittest.TestCase):
     """Аналогия по структуре + подтверждение перед материализацией."""
 
