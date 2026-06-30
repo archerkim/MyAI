@@ -356,6 +356,48 @@ class TestSynonyms(unittest.TestCase):
         self.assertEqual(m["everything"], "matter")
 
 
+class TestKnowledgeManager(unittest.TestCase):
+    """Самоорганизующиеся модули: маршрутизация, выборочная активация, состояние."""
+
+    def setUp(self):
+        self.wd = tempfile.mkdtemp(prefix="km_")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.wd, ignore_errors=True)
+
+    def test_topics_get_separate_module_ids(self):
+        from knowledge_manager import Learner
+        L = Learner(self.wd)
+        L.learn_facts("math", [("number", "is_a", "concept")])
+        L.learn_facts("music", [("note", "part_of", "melody")])
+        self.assertNotEqual(L.registry.topics["math"]["module_id"],
+                            L.registry.topics["music"]["module_id"])
+
+    def test_activation_excludes_other_modules(self):
+        from knowledge_manager import Learner
+        L = Learner(self.wd)
+        L.learn_facts("language", [("word", "part_of", "language")])
+        L.learn_facts("chemistry", [("acid", "opposite_of", "base")])
+        L.learn_facts("music", [("note", "part_of", "melody")])
+        active = L.activate(["chemistry"])
+        self.assertIn("chemistry", active)
+        self.assertIn("language", active)       # язык-ядро всегда
+        self.assertNotIn("music", active)       # музыка выключена
+        self.assertEqual(L.active_brain().get_node_id("note"), -1)       # музыки нет
+        self.assertNotEqual(L.active_brain().get_node_id("acid"), -1)    # химия есть
+        L.active_brain().disconnect()
+
+    def test_state_counts_vocabulary_and_erudition(self):
+        from knowledge_manager import Learner
+        L = Learner(self.wd)
+        L.learn_facts("math", [("number", "is_a", "concept")])
+        L.learn_facts("music", [("note", "part_of", "melody")])
+        st = L.state()
+        self.assertEqual(st["erudition"], 2)                 # две темы
+        self.assertGreaterEqual(st["vocabulary"], 4)         # number,concept,note,melody
+
+
 class TestStructuralPredictor(unittest.TestCase):
     """Аналогия по структуре + подтверждение перед материализацией."""
 
