@@ -126,6 +126,160 @@ def proof_tree(proofs, fact, _depth=0, _seen=None):
     return "\n".join(out)
 
 
+# ============================================================================
+#  Расширения FOL: backward chaining, валидация, противоречия
+# ============================================================================
+
+def prove(goal, facts, max_depth=8):
+    """Backward chaining: ДОКАЗАТЬ конкретную цель goal=(s,r,o), не материализуя
+    весь вывод. Возвращает дерево-доказательство (вложенные кортежи) или None.
+
+    Узел дерева: (fact, rule_or_None, [подцели]). rule=None — факт прямо в графе.
+    Поддерживает те же правила, что и forward_chain.
+    """
+    factset = set(facts)
+    index = {}
+    for (s, r, o) in factset:
+        index.setdefault((s, r), set()).add(o)
+        index.setdefault((r, o), set()).add(s)  # обратный индекс по (relation, object)
+
+    def _prove(g, depth, visiting):
+        if g in factset:
+            return (g, None, [])             # лист: факт уже в графе
+        if depth <= 0 or g in visiting:
+            return None                      # обрыв рекурсии / цикл
+        s, r, o = g
+        visiting = visiting | {g}
+
+        # симметрия: r(s,o) ⇐ r(o,s)
+        if r in SYMMETRIC:
+            sub = _prove((o, r, s), depth - 1, visiting)
+            if sub:
+                return (g, f"symmetry[{r}]", [sub])
+
+        # субсумпция: is_a(s,o) ⇐ example_of(s,o)
+        if r == "is_a":
+            sub = _prove((s, "example_of", o), depth - 1, visiting)
+            if sub:
+                return (g, "subsumption[example_of→is_a]", [sub])
+
+        # транзитивность: r(s,o) ⇐ r(s,m) ∧ r(m,o)
+        if r in TRANSITIVE:
+            for m in index.get((s, r), ()):          # известные s --r--> m
+                if m == o:
+                    continue
+                sub2 = _prove((m, r, o), depth - 1, visiting)
+                if sub2:
+                    return (g, f"transitivity[{r}]", [((s, r, m), None, []), sub2])
+
+        # наследование: has_property(s,o) ⇐ (s via y) ∧ has_property(y,o)
+        if r == "has_property":
+            for via in INHERIT_VIA:
+                for y in index.get((s, via), ()):
+                    sub2 = _prove((y, "has_property", o), depth - 1, visiting)
+                    if sub2:
+                        return (g, f"inheritance[{via}]", [((s, via, y), None, []), sub2])
+        return None
+
+    return _prove(goal, max_depth, frozenset())
+
+
+def render_proof(node, depth=0):
+    """Текстовое дерево backward-доказательства."""
+    if node is None:
+        return "  " * depth + "НЕ ДОКАЗАНО"
+    fact, rule, subs = node
+    pad = "  " * depth
+    line = f"{pad}({fact[0]}) --{fact[1]}--> ({fact[2]})"
+    line += "  [факт из графа]" if rule is None else f"   ⇐ {rule}"
+    return "\n".join([line] + [render_proof(s, depth + 1) for s in subs])
+
+
+def _find_cycle(adj):
+    """Возвращает один цикл (список узлов) в ориентированном adj, или None."""
+    WHITE, GREY, BLACK = 0, 1, 2
+    color, stack = {}, []
+
+    def dfs(u):
+        color[u] = GREY; stack.append(u)
+        for v in adj.get(u, ()):  # noqa
+            if color.get(v, WHITE) == GREY:
+                return stack[stack.index(v):] + [v]
+            if color.get(v, WHITE) == WHITE:
+                c = dfs(v)
+                if c:
+                    return c
+        color[u] = BLACK; stack.pop()
+        return None
+
+    for n in list(adj):
+        if color.get(n, WHITE) == WHITE:
+            c = dfs(n)
+            if c:
+                return c
+    return None
+
+
+def validate(facts):
+    """Структурные нарушения логической согласованности графа.
+    Возвращает список (тип, [причастные факты/узлы])."""
+    facts = set(facts)
+    issues = []
+    # самоссылки в иерархических отношениях
+    for (s, r, o) in facts:
+        if s == o and r in ("is_a", "part_of", "causes"):
+            issues.append((f"self_reference[{r}]", [(s, r, o)]))
+    # циклы в is_a (таксономия) и part_of (мереология) — должны быть DAG
+    for r in ("is_a", "part_of"):
+        adj = {}
+        for (s, rr, o) in facts:
+            if rr == r and s != o:
+                adj.setdefault(s, set()).add(o)
+        cyc = _find_cycle(adj)
+        if cyc:
+            issues.append((f"cycle[{r}]", cyc))
+    return issues
+
+
+def find_contradictions(facts):
+    """Противоречия через семантику opposite_of (взаимное исключение).
+    Возвращает список (тип, [причастные факты])."""
+    facts = set(facts)
+    opp = {}
+    for (s, r, o) in facts:
+        if r == "opposite_of":
+            opp.setdefault(s, set()).add(o)
+            opp.setdefault(o, set()).add(s)
+    issues, seen = [], set()
+
+    def emit(kind, fs):
+        key = (kind, frozenset(fs))
+        if key not in seen:
+            seen.add(key); issues.append((kind, list(fs)))
+
+    # X противоположно самому себе
+    for (s, r, o) in facts:
+        if r == "opposite_of" and s == o:
+            emit("self_opposite", [(s, r, o)])
+    # is_a(X,Y) И opposite_of(X,Y) — нельзя быть видом того, чему противоположен
+    for (s, r, o) in facts:
+        if r == "is_a" and o in opp.get(s, ()):
+            emit("is_a_vs_opposite", [(s, "is_a", o), (s, "opposite_of", o)])
+    # Z обладает двумя ВЗАИМНО ПРОТИВОПОЛОЖНЫМИ свойствами
+    props = {}
+    for (s, r, o) in facts:
+        if r == "has_property":
+            props.setdefault(s, set()).add(o)
+    for z, ps in props.items():
+        for p1 in ps:
+            for p2 in opp.get(p1, ()):
+                if p2 in ps:
+                    a, b = sorted((p1, p2))  # нормализуем порядок, чтобы не дублировать
+                    emit("opposite_properties",
+                         [(z, "has_property", a), (z, "has_property", b), (a, "opposite_of", b)])
+    return issues
+
+
 class GraphReasoner:
     """Применяет FOL-вывод к смонтированному графу и материализует результат."""
 

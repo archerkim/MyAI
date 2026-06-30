@@ -241,5 +241,58 @@ class TestReasoner(unittest.TestCase):
         self.assertIn("факт из графа", tree)  # посылки — исходные факты
 
 
+class TestFOLExtensions(unittest.TestCase):
+    """Backward chaining, валидация, противоречия."""
+
+    def test_backward_chaining_proves_and_fails(self):
+        from reasoner import prove
+        facts = [("a", "part_of", "b"), ("b", "part_of", "c")]
+        self.assertIsNotNone(prove(("a", "part_of", "c"), facts))   # доказуемо
+        self.assertIsNone(prove(("a", "part_of", "z"), facts))      # нет
+
+    def test_validate_catches_cycle_and_self_ref(self):
+        from reasoner import validate
+        kinds = {k for k, _ in validate(
+            [("a", "is_a", "b"), ("b", "is_a", "a"), ("x", "part_of", "x")])}
+        self.assertIn("cycle[is_a]", kinds)
+        self.assertIn("self_reference[part_of]", kinds)
+
+    def test_contradiction_opposite_properties(self):
+        from reasoner import find_contradictions
+        kinds = {k for k, _ in find_contradictions(
+            [("hot", "opposite_of", "cold"),
+             ("stove", "has_property", "hot"), ("stove", "has_property", "cold")])}
+        self.assertIn("opposite_properties", kinds)
+
+
+class TestStructuralPredictor(unittest.TestCase):
+    """Аналогия по структуре + подтверждение перед материализацией."""
+
+    FACTS = [
+        ("motorcycle", "has_property", "wheels"),
+        ("motorcycle", "has_property", "engine"),
+        ("motorcycle", "used_for", "transport"),
+        ("car", "has_property", "engine"),
+        ("car", "used_for", "transport"),
+    ]
+
+    def test_conjectures_car_has_wheels(self):
+        from predictor import StructuralPredictor
+        triples = {c.triple for c in StructuralPredictor(self.FACTS)
+                   .conjectures(min_shared=1, min_sim=0.2)}
+        self.assertIn(("car", "has_property", "wheels"), triples)
+
+    def test_confirmation_promotes_only_matching(self):
+        from predictor import StructuralPredictor, HypothesisStore
+        store = HypothesisStore()
+        store.add(StructuralPredictor(self.FACTS).conjectures(min_shared=1, min_sim=0.2))
+        self.assertIn(("car", "has_property", "wheels"), store.pending)
+        promoted = store.confirm([("car", "has_property", "wheels"),
+                                  ("car", "has_property", "nonexistent")])
+        self.assertEqual(len(promoted), 1)
+        self.assertNotIn(("car", "has_property", "wheels"), store.pending)  # продвинуто
+        self.assertEqual(store.confirmed, [("car", "has_property", "wheels")])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
