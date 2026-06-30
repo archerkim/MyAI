@@ -397,6 +397,13 @@ class TestKnowledgeManager(unittest.TestCase):
         self.assertEqual(st["erudition"], 2)                 # две темы
         self.assertGreaterEqual(st["vocabulary"], 4)         # number,concept,note,melody
 
+    def test_local_acquirer_orders_by_grade(self):
+        from autolearn import LocalAcquirer
+        for fn in ["2_b.txt", "1_a.txt", "10_c.txt", "1_aa.txt"]:
+            open(os.path.join(self.wd, fn), "w").write("x is a y.")
+        names = [n for n, _ in LocalAcquirer(self.wd)]
+        self.assertEqual(names, ["1_a.txt", "1_aa.txt", "2_b.txt", "10_c.txt"])
+
 
 class TestStructuralPredictor(unittest.TestCase):
     """Аналогия по структуре + подтверждение перед материализацией."""

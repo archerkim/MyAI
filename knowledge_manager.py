@@ -155,26 +155,32 @@ class Learner:
         from predictor import facts_from_brain
         from graph_quality import evaluate
         vocab = set()
+        all_facts = set()
         per_module = {}
         for topic in self.registry.topics:
             fpath = self._file(topic)
             if not os.path.exists(fpath):
                 continue
             b = BrainConnectionLocal(); b.connect(); b.load(fpath)
-            N = b.get_stats()["node_count"]
-            concepts = {b.get_lemma_by_id(i) for i in range(N)}
+            facts = facts_from_brain(b)
+            all_facts |= facts
+            concepts = {x for (s, _, o) in facts for x in (s, o)}
             vocab |= concepts
             per_module[topic] = len(concepts)
             b.disconnect()
-        understanding = None
+        # понимание = качество ВСЕГО накопленного знания (graph_quality)
+        understanding = round(evaluate(list(all_facts))["composite"], 3) if all_facts else None
+        # понимание активного среза (что сейчас в «рабочей памяти»)
+        active_understanding = None
         if self._active:
-            facts = facts_from_brain(self._active)
-            if facts:
-                understanding = evaluate(facts)["composite"]
+            af = facts_from_brain(self._active)
+            if af:
+                active_understanding = round(evaluate(list(af))["composite"], 3)
         return {
             "vocabulary": len(vocab),                 # всего изученных концептов
             "erudition": len(per_module),             # широта: число тем-модулей
-            "understanding": understanding,           # качество активного графа
+            "understanding": understanding,           # качество всего знания
+            "active_understanding": active_understanding,
             "modules": per_module,
             "active": self._active_topics,
         }
