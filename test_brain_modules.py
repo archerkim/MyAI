@@ -480,6 +480,23 @@ class TestEffectiveness(unittest.TestCase):
         rep = evaluate(self.FACTS, one)
         self.assertEqual(rep["subscores"]["emergence"], 0.0)
 
+    def test_raw_provenance_counts_multi_source_agreement(self):
+        # один и тот же факт от двух источников = корроборация (видна ТОЛЬКО в сыром
+        # провенансе: слитый граф хранит один module_id на ребро)
+        from effectiveness import evaluate_raw
+        raw = [["a", "is_a", "b", 1], ["a", "is_a", "b", 2], ["b", "is_a", "c", 1]]
+        rep = evaluate_raw(raw, normalize=False)
+        self.assertEqual(rep["diagnostics"]["multi_source_agreed"], 1)
+        self.assertGreater(rep["subscores"]["corroboration"], 0.0)
+
+    def test_synonyms_create_agreement(self):
+        # варианты концепта от разных источников → после синонимов один факт
+        from effectiveness import evaluate_raw
+        raw = [["atom", "has_property", "motion", 1],
+               ["atom", "has_property", "jiggling", 2]]   # jiggling→motion (synonyms)
+        rep = evaluate_raw(raw, normalize=True)
+        self.assertEqual(rep["diagnostics"]["multi_source_agreed"], 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

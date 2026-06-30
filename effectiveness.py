@@ -29,6 +29,7 @@ import argparse
 from collections import defaultdict
 
 import graph_quality
+from brain_core_wrapper_local import ALLOWED_RELATIONS
 from reasoner import forward_chain, validate, find_contradictions
 from reflection import (synergistic_deductions, convergent_conclusions,
                         _leaves, GraphReflector)
@@ -101,11 +102,16 @@ def evaluate(facts, fact_sources):
     insights, _ = synergistic_deductions(facts, fact_sources)
     emergence = (len(insights) / nd) if nd else 0.0
 
-    # corroboration: доля транзитивных заключений с ≥2 независимыми свидетелями
+    # corroboration: доля знания с ≥2 НЕЗАВИСИМЫМИ опорами. Две формы опоры:
+    #   (a) СОГЛАСИЕ источников — один факт утверждён ≥2 модулями (виден только в
+    #       сыром провенансе до слияния: C-граф хранит один module_id на ребро);
+    #   (b) КОНВЕРГЕНЦИЯ путей — транзитивное заключение с ≥2 промежуточными.
+    agreed = [t for t, ms in fact_sources.items() if len(ms) >= 2]
     conv = convergent_conclusions(facts, fact_sources)
-    transitive_derived = [d for d in derived if "is_a" == d[1] or d[1] in ("part_of", "causes")]
-    corroboration = (len(conv) / len(transitive_derived)) if transitive_derived else 0.0
-    corroboration = min(corroboration, 1.0)
+    transitive_derived = [d for d in derived if d[1] in ("is_a", "part_of", "causes")]
+    supported = len(agreed) + len(conv)
+    claims = asserted + len(transitive_derived)
+    corroboration = min(supported / claims, 1.0) if claims else 0.0
 
     subs = {
         "substrate": substrate,
@@ -126,6 +132,7 @@ def evaluate(facts, fact_sources):
             "derived_facts": nd,
             "emergent_insights": len(insights),
             "convergent_conclusions": len(conv),
+            "multi_source_agreed": len(agreed),
             "sources": n_sources,
             "substrate_composite": substrate,
         },
@@ -134,6 +141,32 @@ def evaluate(facts, fact_sources):
 
 def evaluate_brain(brain):
     facts, fact_sources = GraphReflector(brain).load()
+    return evaluate(facts, fact_sources)
+
+
+def facts_from_raw(raw_triples, normalize=True):
+    """Строит (facts, fact_sources) из СЫРЫХ триплетов [s, r, o, module] ДО слияния
+    в граф. Только так видно СОГЛАСИЕ источников: C-граф хранит один module_id на
+    ребро, поэтому один факт от N источников там схлопывается. normalize=True
+    прогоняет концепты через языковой слой синонимов (варианты → канон), чтобы
+    «atoms in motion» и «atomic movement» считались одним фактом и корроборировали."""
+    from collections import defaultdict
+    facts, fact_sources = set(), defaultdict(set)
+    norm = None
+    if normalize:
+        from synonyms import normalize_triple
+        norm = normalize_triple
+    for s, r, o, m in raw_triples:
+        tri = norm((s, r, o)) if norm else (s, r, o)
+        if r not in ALLOWED_RELATIONS or tri[0] == tri[2]:
+            continue
+        facts.add(tri)
+        fact_sources[tri].add(m)
+    return facts, fact_sources
+
+
+def evaluate_raw(raw_triples, normalize=True):
+    facts, fact_sources = facts_from_raw(raw_triples, normalize)
     return evaluate(facts, fact_sources)
 
 
@@ -191,12 +224,20 @@ if __name__ == "__main__":
     ap.add_argument("modules", nargs="*", help="пути к .brain (каждый — отдельный источник)")
     ap.add_argument("--live", action="store_true",
                     help="реальный прогон: извлечь встроенный 2-источниковый корпус через qwen")
+    ap.add_argument("--raw", help="JSON-список сырых [s,r,o,module] (провенанс ДО слияния)")
+    ap.add_argument("--no-normalize", action="store_true",
+                    help="не применять слой синонимов к --raw")
     ap.add_argument("--model", default=None)
     a = ap.parse_args()
 
     from brain_core_wrapper_local import BrainConnectionLocal
 
-    if a.live:
+    if a.raw:
+        import json
+        raw = json.load(open(a.raw))
+        print(f"[raw] сырых триплетов: {len(raw)}  (synonyms={'off' if a.no_normalize else 'on'})")
+        print_report(evaluate_raw(raw, normalize=not a.no_normalize))
+    elif a.live:
         print("[live] извлечение реального корпуса через Ollama…")
         brain = build_live_brain(a.model)
         print_report(evaluate_brain(brain))
