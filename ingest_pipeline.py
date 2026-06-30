@@ -148,7 +148,8 @@ def _chunk_text(paragraphs, max_chars=DEFAULT_MAX_CHARS):
 
 
 def ingest_document(path, out_path, module_id=1, model=DEFAULT_MODEL,
-                    max_chars=DEFAULT_MAX_CHARS, strict=True, memory=True):
+                    max_chars=DEFAULT_MAX_CHARS, strict=True, memory=True,
+                    clean=False):
     """Полный пайплайн: документ → чанки → триплеты → .brain-модуль.
 
     memory=True (деф.) использует StreamingExtractor: память протягивает
@@ -157,12 +158,25 @@ def ingest_document(path, out_path, module_id=1, model=DEFAULT_MODEL,
     Эффект реален на qwen2.5 (дефолт-модель); на llama3.1:8b память бесполезна —
     тогда есть смысл в memory=False (по-чанковый stateless extract_triples).
 
+    clean=True прогоняет абзацы через clean_document.is_boilerplate перед
+    чанкингом, отбрасывая служебный текст (js/browser/feedback/nav), чтобы он
+    не засорял граф мусорными узлами.
+
     Возвращает (triples, stats), где triples — все извлечённые триплеты
     (без dedup), stats — словарь get_stats() итогового модуля.
     """
     paragraphs = _read_paragraphs(path)
     if not paragraphs:
         raise ValueError(f"из документа не удалось извлечь текст: {path}")
+    if clean:
+        # ленивый импорт: clean_document импортирует _read_paragraphs отсюда же
+        from clean_document import is_boilerplate
+        before = len(paragraphs)
+        paragraphs = [p for p in paragraphs if not is_boilerplate(p)[0]]
+        print(f"[0/4] чистка: {before} → {len(paragraphs)} абзац(ев) "
+              f"(boilerplate отброшен)")
+        if not paragraphs:
+            raise ValueError("после чистки не осталось текста — ослабь критерии")
     chunks = _chunk_text(paragraphs, max_chars)
     print(f"[1/4] текст: {len(paragraphs)} абзац(ев) → {len(chunks)} чанк(ов) "
           f"(≤{max_chars} симв.)")
@@ -249,6 +263,9 @@ def main(argv=None):
     parser.add_argument("--no-memory", action="store_true",
                         help="извлекать чанки независимо (без StreamingExtractor-памяти; "
                              "имеет смысл на llama3.1:8b, где память бесполезна)")
+    parser.add_argument("--clean", action="store_true",
+                        help="отбросить boilerplate (js/browser/feedback/nav) до ингеста "
+                             "через clean_document.is_boilerplate")
     parser.add_argument("--mount", action="store_true",
                         help="после сборки смонтировать модуль в свежий мозг и показать stats")
     args = parser.parse_args(argv)
@@ -269,6 +286,7 @@ def main(argv=None):
             max_chars=args.max_chars,
             strict=not args.no_strict,
             memory=not args.no_memory,
+            clean=args.clean,
         )
     except (ValueError, RuntimeError) as e:
         print(f"[error] {e}", file=sys.stderr)
