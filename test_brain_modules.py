@@ -283,6 +283,32 @@ class TestFOLExtensions(unittest.TestCase):
         self.assertEqual(clean.count(("x", "causes", "y")), 2)
 
 
+class TestGraphQuality(unittest.TestCase):
+    """Метрика качества графа должна различать чистый и мусорный граф."""
+
+    def test_clean_scores_higher_than_messy(self):
+        from graph_quality import evaluate
+        clean = [("force", "causes", "acceleration"), ("acceleration", "is_a", "change"),
+                 ("mass", "has_property", "inertia"), ("force", "measured_in", "newton"),
+                 ("energy", "is_a", "quantity"), ("energy", "measured_in", "joule")]
+        messy = [("a_very_long_phrase_concept_here", "related_to", "another_long_phrase_thing"),
+                 ("javascript_console", "has_property", "messages"),
+                 ("atoms", "is_a", "thing"), ("atom", "is_a", "thing"),  # дубль ед./мн.
+                 ("x", "is_a", "y"), ("y", "is_a", "x")]                  # цикл
+        sc_clean = evaluate(clean)["composite"]
+        sc_messy = evaluate(messy)["composite"]
+        self.assertGreater(sc_clean, sc_messy)
+
+    def test_metrics_in_unit_range(self):
+        from graph_quality import evaluate
+        rep = evaluate([("a", "is_a", "b"), ("b", "part_of", "c")])
+        for v in rep["subscores"].values():
+            self.assertGreaterEqual(v, 0.0)
+            self.assertLessEqual(v, 1.0)
+        self.assertGreaterEqual(rep["composite"], 0.0)
+        self.assertLessEqual(rep["composite"], 1.0)
+
+
 class TestStructuralPredictor(unittest.TestCase):
     """Аналогия по структуре + подтверждение перед материализацией."""
 
