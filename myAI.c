@@ -472,54 +472,72 @@ int brain_set_activation(BrainHandle handle, uint32_t node_id, float value) {
 int brain_spread_activation_step(BrainHandle handle, const uint32_t* anchor_ids, size_t num_anchors) {
     if (!handle) return -1;
     Graph* graph = (Graph*)handle;
-    float* next_activations = (float*)calloc(graph->node_count, sizeof(float));
+    uint32_t n = graph->node_count;
+
+    float* next_activations = (float*)calloc(n, sizeof(float));
     if (!next_activations) return -2;
 
-    char* is_anchor_node = (char*)calloc(graph->node_count, sizeof(char));
+    char* is_anchor_node = (char*)calloc(n, sizeof(char));
     if (!is_anchor_node) { free(next_activations); return -2; }
     for (size_t i = 0; i < num_anchors; ++i) {
-        is_anchor_node[anchor_ids[i]] = 1;
+        if (anchor_ids[i] < n) is_anchor_node[anchor_ids[i]] = 1; // защита от OOB
     }
 
-    for (uint32_t i = 0; i < graph->node_count; ++i) {
-        Node* current_node = &graph->nodes[i];
+    // --- ДВУНАПРАВЛЕННОЕ распространение активации ---
+    // Граф НАПРАВЛЕННЫЙ, и направление несёт СЕМАНТИКУ (causes, part_of, is_a…).
+    // Но активация — это мера РЕЛЕВАНТНОСТИ, и для неё направление неважно: если
+    // A связано с B, активация A должна достигать B и наоборот. Старая версия
+    // растекала только по ИСХОДЯЩИМ рёбрам, поэтому концепты-цели (напр. atom, у
+    // которого почти все рёбра входящие — «X part_of atom») не растекали ничего и
+    // запрос про них возвращал пустоту. Теперь для распространения активации граф
+    // трактуется как НЕОРИЕНТИРОВАННЫЙ: каждое ребро проводит активацию в обе
+    // стороны. Семантика рёбер при этом не меняется — она используется на этапе
+    // вербализации, а не распространения.
 
-        // если узел "спит", он ничего не излучает
-        if (current_node->activation == 0.0f) {
-            continue;
-        }
-
-        // посчитаем сумму проводимостей всех исходящих ребер
-        float total_conductance = 0.0f;
-        for (uint32_t j = 0; j < current_node->edge_count; ++j) {
-            total_conductance += current_node->edges[j].conductance;
-        }
-
-        if (total_conductance == 0.0f) {
-            continue; // узел-тупик
-        }
-
-        // теперь "делим" активацию
-        for (uint32_t j = 0; j < current_node->edge_count; ++j) {
-            Edge* edge = &current_node->edges[j];
-            Node* neighbor_node = &graph->nodes[edge->to_node_id];
-
-            float activation_to_send = current_node->activation * (edge->conductance / total_conductance);
-
-            // накапливаем "приходящую" активацию во временном массиве
-            next_activations[neighbor_node->id] += activation_to_send;
+    // pass 1: суммарная ИНЦИДЕНТНАЯ проводимость каждого узла (out + in).
+    // Нужна как знаменатель: узел делит свою активацию между ВСЕМИ своими рёбрами,
+    // а не только исходящими, — иначе сохранение активации нарушится.
+    float* total_cond = (float*)calloc(n, sizeof(float));
+    if (!total_cond) { free(next_activations); free(is_anchor_node); return -2; }
+    for (uint32_t u = 0; u < n; ++u) {
+        Node* node = &graph->nodes[u];
+        for (uint32_t j = 0; j < node->edge_count; ++j) {
+            float c = node->edges[j].conductance;
+            uint32_t v = node->edges[j].to_node_id;
+            total_cond[u] += c; // ребро инцидентно источнику u
+            total_cond[v] += c; // ...и цели v
         }
     }
-    for (uint32_t i = 0; i < graph->node_count; ++i) {
-        // здесь можно добавить "затухание" - чтобы энергия не накапливалась вечно
-        // и "внешний приток" - чтобы якоря оставались активными
+
+    // pass 2: распространение. Каждое ребро (хранится в списке исходящих источника)
+    // обрабатывается ОДИН раз, но проводит активацию в ОБА конца. Доля, уходящая по
+    // ребру, нормирована на суммарную проводимость ОТПРАВИТЕЛЯ — так суммарная
+    // отданная узлом активация равна его активации (сохранение «энергии»).
+    for (uint32_t u = 0; u < n; ++u) {
+        Node* node = &graph->nodes[u];
+        float act_u = node->activation;
+        for (uint32_t j = 0; j < node->edge_count; ++j) {
+            uint32_t v = node->edges[j].to_node_id;
+            float c = node->edges[j].conductance;
+            float act_v = graph->nodes[v].activation;
+            if (act_u != 0.0f && total_cond[u] > 0.0f)         // u -> v
+                next_activations[v] += act_u * (c / total_cond[u]);
+            if (act_v != 0.0f && total_cond[v] > 0.0f)         // v -> u (то же ребро назад)
+                next_activations[u] += act_v * (c / total_cond[v]);
+        }
+    }
+
+    // --- интеграция: затухание + подпитка якорей ---
+    // decay не даёт энергии копиться вечно; anchor_boost держит узлы-якоря
+    // «горячими», чтобы активация продолжала исходить из точек запроса.
+    for (uint32_t i = 0; i < n; ++i) {
         float decay_factor = 0.5f;
         float anchor_boost = (is_anchor_node[i] == 1) ? 0.5f : 0.0f;
-
-        // новая активация = (старая * затухание) + приток от соседей + подпитка якоря
-        graph->nodes[i].activation = (graph->nodes[i].activation * decay_factor) + next_activations[i] + anchor_boost;
+        graph->nodes[i].activation =
+            (graph->nodes[i].activation * decay_factor) + next_activations[i] + anchor_boost;
     }
 
+    free(total_cond);
     free(next_activations);
     free(is_anchor_node);
     return 0;
