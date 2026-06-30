@@ -58,6 +58,34 @@ def dep_label_to_enum(label):
     """конвертирует строку-метку зависимости spaCy в ее целочисленное значение enum."""
     return DEP_TYPE_MAP.get(label, 0)
 
+# --- семантический словарь отношений (нейро-символический ингест) ---
+# ДОЛЖЕН быть синхронизирован с enum REL_* в myAI.c (значения с 100).
+RELATION_TYPE_MAP = {
+    "is_a": 100,
+    "part_of": 101,
+    "has_property": 102,
+    "causes": 103,
+    "requires": 104,
+    "enables": 105,
+    "used_for": 106,
+    "defined_as": 107,
+    "measured_in": 108,
+    "example_of": 109,
+    "opposite_of": 110,
+    "related_to": 111,
+}
+
+# список разрешённых отношений для промпта LLM-экстрактора (единый источник правды)
+ALLOWED_RELATIONS = list(RELATION_TYPE_MAP.keys())
+
+def relation_label_to_enum(label):
+    """строка семантического отношения -> int enum (related_to как fallback)."""
+    return RELATION_TYPE_MAP.get(label, RELATION_TYPE_MAP["related_to"])
+
+# объединённая обратная карта int -> строка (для вербализации и инспекции)
+INT_TO_LABEL = {v: k for k, v in DEP_TYPE_MAP.items()}
+INT_TO_LABEL.update({v: k for k, v in RELATION_TYPE_MAP.items()})
+
 # c-шная структура ParsedToken, воссозданная в ctypes
 class ParsedTokenC(ctypes.Structure):
     _fields_ = [
@@ -84,7 +112,8 @@ class EdgeInfoC(ctypes.Structure):
         ("from_id", ctypes.c_uint32),
         ("to_id", ctypes.c_uint32),
         ("dep_type", ctypes.c_int),
-        ("conductance", ctypes.c_float)
+        ("conductance", ctypes.c_float),
+        ("module_id", ctypes.c_uint16)
     ]
 
 # --- 3. объявление прототипов c-функций ---
@@ -136,6 +165,30 @@ if brain_lib:
         ctypes.c_float
     ]
     brain_lib.brain_set_activation.restype = ctypes.c_int
+
+    # --- персистентность и модули знаний ---
+    brain_lib.brain_save.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    brain_lib.brain_save.restype = ctypes.c_int
+
+    brain_lib.brain_load.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    brain_lib.brain_load.restype = ctypes.c_int
+
+    brain_lib.brain_merge_from_file.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint16]
+    brain_lib.brain_merge_from_file.restype = ctypes.c_int
+
+    brain_lib.brain_set_module_id.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
+    brain_lib.brain_set_module_id.restype = None
+
+    brain_lib.brain_add_triple.argtypes = [
+        ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p
+    ]
+    brain_lib.brain_add_triple.restype = ctypes.c_int
+
+    brain_lib.brain_unmount_module.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
+    brain_lib.brain_unmount_module.restype = ctypes.c_size_t
+
+    brain_lib.brain_count_module_edges.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
+    brain_lib.brain_count_module_edges.restype = ctypes.c_size_t
 # --- 4. класс-обертка ---
 
 class BrainConnectionLocal:
@@ -153,7 +206,7 @@ class BrainConnectionLocal:
         return True
     def connect(self):
         """создает новый граф в памяти и сохраняет указатель на него."""
-        if not self.is_connected():
+        if self.is_connected():
             print("[warning] already connected. disconnecting first.")
             self.disconnect()
 
@@ -164,7 +217,7 @@ class BrainConnectionLocal:
 
     def disconnect(self):
         """освобождает память, занятую графом."""
-        if not self.is_connected():
+        if self.is_connected():
             print("[wrapper] freeing brain instance via c-library...")
             brain_lib.brain_free(self.graph_ptr)
             self.graph_ptr = None
@@ -309,7 +362,8 @@ class BrainConnectionLocal:
                 "from_id": edge_c.from_id,
                 "to_id": edge_c.to_id,
                 "dep_type": edge_c.dep_type, # можно конвертировать в строку здесь
-                "conductance": edge_c.conductance
+                "conductance": edge_c.conductance,
+                "module_id": edge_c.module_id
             })
         return py_results
     def set_activation(self, node_id, value):
@@ -320,3 +374,115 @@ class BrainConnectionLocal:
         if not self.is_connected():
             raise ConnectionError("not connected")
         brain_lib.brain_reset_activations(self.graph_ptr)
+
+    # --- персистентность и модули знаний ---
+    def set_module_id(self, module_id):
+        """тег, которым помечаются рёбра при последующем ингесте (0 = ядро)."""
+        if not self.is_connected():
+            raise ConnectionError("not connected")
+        brain_lib.brain_set_module_id(self.graph_ptr, module_id)
+
+    def save(self, path):
+        """сохраняет весь текущий граф в бинарный файл модуля (.brain)."""
+        if not self.is_connected():
+            raise ConnectionError("not connected")
+        rc = brain_lib.brain_save(self.graph_ptr, str(path).encode("utf-8"))
+        if rc != 0:
+            raise RuntimeError(f"brain_save() returned error code {rc}")
+
+    def load(self, path):
+        """загружает граф из файла В ПУСТОЙ мозг (точное восстановление весов)."""
+        if not self.is_connected():
+            raise ConnectionError("not connected")
+        rc = brain_lib.brain_load(self.graph_ptr, str(path).encode("utf-8"))
+        if rc != 0:
+            raise RuntimeError(f"brain_load() returned error code {rc}")
+
+    def merge_from_file(self, path, module_id):
+        """монтирует модуль поверх текущего графа (склейка по леммам)."""
+        if not self.is_connected():
+            raise ConnectionError("not connected")
+        rc = brain_lib.brain_merge_from_file(self.graph_ptr, str(path).encode("utf-8"), module_id)
+        if rc != 0:
+            raise RuntimeError(f"brain_merge_from_file() returned error code {rc}")
+
+    def mount_module(self, path, module_id):
+        """СОЕДИНЕНИЕ (идемпотентно): подключает модуль из файла под данным
+        module_id. Если модуль с этим id уже смонтирован — сначала снимает его,
+        чтобы повторное монтирование не накапливало проводимость."""
+        if not self.is_connected():
+            raise ConnectionError("not connected")
+        self.unmount_module(module_id)
+        self.merge_from_file(path, module_id)
+
+    def unmount_module(self, module_id):
+        """РАЗЪЕДИНЕНИЕ: снимает модуль (удаляет все его рёбра).
+        Возвращает число удалённых рёбер."""
+        if not self.is_connected():
+            raise ConnectionError("not connected")
+        return brain_lib.brain_unmount_module(self.graph_ptr, module_id)
+
+    def count_module_edges(self, module_id):
+        """сколько рёбер сейчас принадлежит модулю (0 = не смонтирован)."""
+        if not self.is_connected():
+            raise ConnectionError("not connected")
+        return brain_lib.brain_count_module_edges(self.graph_ptr, module_id)
+
+    def add_triple(self, subject, relation, obj):
+        """нейро-символический ингест: (subject) --relation--> (object).
+        relation — строка из ALLOWED_RELATIONS (или int enum)."""
+        if not self.is_connected():
+            raise ConnectionError("not connected")
+        rel_int = relation if isinstance(relation, int) else relation_label_to_enum(relation)
+        rc = brain_lib.brain_add_triple(
+            self.graph_ptr,
+            subject.encode("utf-8"),
+            rel_int,
+            obj.encode("utf-8"),
+        )
+        if rc != 0:
+            raise RuntimeError(f"brain_add_triple() returned error code {rc}")
+
+
+# --- утилиты уровня пакета знаний (без сервера и без ИИ) ---
+
+def build_module_from_triples(triples, out_path, module_id=1):
+    """Собирает пакет знаний из списка триплетов и сохраняет в .brain.
+
+    triples — итерируемое из (subject, relation, object) либо dict с теми же
+    ключами. relation — строка из ALLOWED_RELATIONS. Возвращает статистику.
+    """
+    brain = BrainConnectionLocal()
+    brain.connect()
+    try:
+        brain.set_module_id(module_id)
+        for t in triples:
+            if isinstance(t, dict):
+                subj, rel, obj = t["subject"], t["relation"], t["object"]
+            else:
+                subj, rel, obj = t
+            brain.add_triple(subj, rel, obj)
+        stats = brain.get_stats()
+        brain.save(out_path)
+        return stats
+    finally:
+        brain.disconnect()
+
+
+def merge_module_files(input_paths, out_path):
+    """СЛИЯНИЕ: объединяет несколько .brain-пакетов в один файл.
+
+    Узлы склеиваются по каноническому концепту; рёбра и их веса сохраняются
+    точно, исходные module_id каждого пакета остаются (так объединённый пакет
+    можно потом разъединить обратно). Возвращает статистику итогового графа.
+    """
+    brain = BrainConnectionLocal()
+    brain.connect()
+    try:
+        for path in input_paths:
+            brain.load(path)  # load умеет дозагружать в непустой граф (append)
+        stats = brain.get_stats()
+        brain.save(out_path)
+        return stats
+    finally:
+        brain.disconnect()

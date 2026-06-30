@@ -1,10 +1,9 @@
-from brain_core_wrapper_local import DEP_TYPE_MAP
-
-_INT_TO_DEP_LABEL = {v: k for k, v in DEP_TYPE_MAP.items()}
+from brain_core_wrapper_local import INT_TO_LABEL
 
 def dep_type_to_string(dep_type_int):
-    """конвертирует целочисленный enum DependencyType в его строковое представление."""
-    return _INT_TO_DEP_LABEL.get(dep_type_int, "UNKNOWN")
+    """конвертирует целочисленный enum (синтаксический DEP_* или семантический
+    REL_*) в его строковое представление."""
+    return INT_TO_LABEL.get(dep_type_int, "UNKNOWN")
 def format_subgraph_for_prompt(nodes, edges):
     """превращает подграф в текстовое представление для llm."""
     prompt_part = "key concepts and their relations:\n"
