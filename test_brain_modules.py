@@ -385,5 +385,62 @@ class TestStructuralPredictor(unittest.TestCase):
         self.assertEqual(store.confirmed, [("car", "has_property", "wheels")])
 
 
+class TestReflection(unittest.TestCase):
+    """Рефлексия: эмерджентные выводы на стыке источников («1+1 > 2»)."""
+
+    # Два источника. По отдельности ни один не выводит whale→needs_oxygen.
+    FACTS = {
+        ("whale", "is_a", "mammal"),
+        ("mammal", "is_a", "animal"),
+        ("mammal", "has_property", "warm_blooded"),   # целиком в источнике 1
+        ("animal", "has_property", "needs_oxygen"),    # источник 2
+    }
+    SRC = {
+        ("whale", "is_a", "mammal"): {1},
+        ("mammal", "is_a", "animal"): {1},
+        ("mammal", "has_property", "warm_blooded"): {1},
+        ("animal", "has_property", "needs_oxygen"): {2},
+    }
+
+    def test_cross_source_insight_emerges(self):
+        from reflection import synergistic_deductions
+        ins, _ = synergistic_deductions(self.FACTS, self.SRC)
+        triples = {i.triple for i in ins}
+        # выводимо ТОЛЬКО объединением источников 1 и 2:
+        self.assertIn(("whale", "has_property", "needs_oxygen"), triples)
+
+    def test_intra_source_deduction_is_not_emergent(self):
+        # warm_blooded целиком из источника 1 → НЕ эмерджентно, не должно всплыть
+        from reflection import synergistic_deductions
+        ins, _ = synergistic_deductions(self.FACTS, self.SRC)
+        triples = {i.triple for i in ins}
+        self.assertNotIn(("whale", "has_property", "warm_blooded"), triples)
+        for i in ins:
+            self.assertGreaterEqual(len(i.sources), 2)   # инвариант: всегда ≥2 источника
+
+    def test_non_decomposability_single_source_yields_nothing(self):
+        # Если весь граф из одного источника, эмерджентных выводов нет по определению
+        from reflection import synergistic_deductions
+        one_src = {t: {1} for t in self.FACTS}
+        ins, _ = synergistic_deductions(self.FACTS, one_src)
+        self.assertEqual(ins, [])
+
+    def test_bridge_concept_is_the_junction(self):
+        from reflection import bridge_concepts
+        bridges = {b.node for b in bridge_concepts(self.FACTS, self.SRC)}
+        self.assertIn("animal", bridges)   # узел, где сходятся источники 1 и 2
+        self.assertNotIn("whale", bridges)  # whale инцидентен только источнику 1
+
+    def test_convergent_needs_two_independent_witnesses(self):
+        from reflection import convergent_conclusions
+        # два независимых пути a→d: через b и через c
+        facts = {("a", "is_a", "b"), ("b", "is_a", "d"),
+                 ("a", "is_a", "c"), ("c", "is_a", "d")}
+        src = {t: {1} for t in facts}
+        conv = {c.triple: c for c in convergent_conclusions(facts, src)}
+        self.assertIn(("a", "is_a", "d"), conv)
+        self.assertEqual(conv[("a", "is_a", "d")].witnesses, frozenset({"b", "c"}))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
