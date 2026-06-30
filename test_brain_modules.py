@@ -411,6 +411,45 @@ class TestKnowledgeManager(unittest.TestCase):
             WebAcquirer(["Atom"], lang="evil")          # вне allowlist → отказ
 
 
+class TestTemporalMemory(unittest.TestCase):
+    """[research] би-темпоральные факты + update-семантика."""
+
+    def test_functional_update_moved_cities(self):
+        from temporal_memory import TemporalStore
+        ts = TemporalStore()
+        ts.assert_fact("alice", "located_in", "paris", valid_from=100)
+        ts.assert_fact("alice", "located_in", "london", valid_from=200)  # вытесняет
+        self.assertEqual(ts.current(at=150), [("alice", "located_in", "paris")])
+        self.assertEqual(ts.current(at=250), [("alice", "located_in", "london")])
+        ts.close()
+
+    def test_corroboration_accumulates_confidence(self):
+        from temporal_memory import TemporalStore
+        ts = TemporalStore()
+        ts.assert_fact("water", "is_a", "liquid")
+        ts.assert_fact("water", "is_a", "liquid")        # повтор → корроборация
+        conf = ts.history("water")[0][-1]
+        self.assertEqual(conf, 2.0)
+        ts.close()
+
+    def test_invalidate_keeps_history(self):
+        from temporal_memory import TemporalStore
+        ts = TemporalStore()
+        ts.assert_fact("x", "is_a", "y")
+        ts.invalidate("x", "is_a", "y")
+        self.assertEqual(ts.current(), [])               # забыто из актуального
+        self.assertEqual(len(ts.history("x")), 1)        # но в истории осталось
+        ts.close()
+
+    def test_multivalued_relations_coexist(self):
+        from temporal_memory import TemporalStore
+        ts = TemporalStore()
+        ts.assert_fact("force", "causes", "acceleration")
+        ts.assert_fact("force", "causes", "movement")    # has many — не вытесняет
+        self.assertEqual(len(ts.current()), 2)
+        ts.close()
+
+
 class TestStructuralPredictor(unittest.TestCase):
     """Аналогия по структуре + подтверждение перед материализацией."""
 
