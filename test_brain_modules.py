@@ -200,5 +200,46 @@ class TestCorruptFiles(TempBrainMixin):
             b.load(bad)
 
 
+class TestReasoner(unittest.TestCase):
+    """FOL forward-chaining (reasoner.py) — чистая логика, без графа."""
+
+    def test_transitivity_multi_hop(self):
+        from reasoner import forward_chain
+        facts = [("a", "part_of", "b"), ("b", "part_of", "c"), ("c", "part_of", "d")]
+        derived, _ = forward_chain(facts)
+        ds = set(derived)
+        self.assertIn(("a", "part_of", "c"), ds)
+        self.assertIn(("b", "part_of", "d"), ds)
+        self.assertIn(("a", "part_of", "d"), ds)  # вывод из выведенного (fixpoint)
+
+    def test_property_inheritance(self):
+        from reasoner import forward_chain
+        facts = [("hydrogen", "is_a", "element"), ("element", "has_property", "mass")]
+        derived, _ = forward_chain(facts)
+        self.assertIn(("hydrogen", "has_property", "mass"), set(derived))
+
+    def test_symmetry_and_subsumption(self):
+        from reasoner import forward_chain
+        facts = [("hot", "opposite_of", "cold"), ("water", "example_of", "liquid")]
+        ds = set(forward_chain(facts)[0])
+        self.assertIn(("cold", "opposite_of", "hot"), ds)   # симметрия
+        self.assertIn(("water", "is_a", "liquid"), ds)      # субсумпция
+
+    def test_no_self_loops_and_terminates(self):
+        from reasoner import forward_chain
+        # цикл a->b->a не должен порождать (a,part_of,a) и должен завершиться
+        derived, _ = forward_chain([("a", "part_of", "b"), ("b", "part_of", "a")])
+        self.assertNotIn(("a", "part_of", "a"), set(derived))
+        self.assertNotIn(("b", "part_of", "b"), set(derived))
+
+    def test_proof_is_traceable(self):
+        from reasoner import forward_chain, proof_tree
+        facts = [("a", "is_a", "b"), ("b", "is_a", "c")]
+        _, proofs = forward_chain(facts)
+        tree = proof_tree(proofs, ("a", "is_a", "c"))
+        self.assertIn("transitivity[is_a]", tree)
+        self.assertIn("факт из графа", tree)  # посылки — исходные факты
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
