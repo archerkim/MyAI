@@ -44,18 +44,48 @@ class LocalAcquirer:
                           errors="replace").read()
 
 
-class WebAcquirer:
-    """ЗАГОТОВКА: автономный отбор материала из интернета. Требует подключения
-    WebSearch/WebFetch и ЯВНОГО согласия (выход в сеть — действие наружу)."""
+# КОНТРОЛИРУЕМЫЙ веб: только доверенные открытые источники. Wikipedia REST
+# summary API отдаёт ЧИСТЫЙ текст-введение (начальный уровень, без HTML-мусора).
+ALLOWED_HOSTS = {"simple.wikipedia.org", "en.wikipedia.org"}
 
-    def __init__(self, topics_plan):
-        self.plan = topics_plan
+
+class WebAcquirer:
+    """Контролируемый отбор учебного материала из открытых источников.
+
+    Человек в контуре: темы (titles) задаёт человек, источники — из ALLOWED_HOSTS,
+    число материалов ограничено (max_items). Это НЕ открытый краулинг.
+    lang='simple' = Simple English Wikipedia (текст начального уровня).
+    """
+
+    def __init__(self, titles, lang="simple", max_items=None):
+        host = f"{lang}.wikipedia.org"
+        if host not in ALLOWED_HOSTS:
+            raise ValueError(f"источник {host} не в allowlist {ALLOWED_HOSTS}")
+        self.titles = titles
+        self.host = host
+        self.max_items = max_items
+
+    def _summary(self, title):
+        import json
+        import urllib.parse
+        import urllib.request
+        url = (f"https://{self.host}/api/rest_v1/page/summary/"
+               f"{urllib.parse.quote(title.replace(' ', '_'))}")
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "MyAI-learner/0.1 (educational; non-commercial)"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.load(r).get("extract", "")
 
     def __iter__(self):
-        raise NotImplementedError(
-            "WebAcquirer не активирован: выход в интернет нужно включить и "
-            "согласовать. Подключи WebSearch/WebFetch и реализуй отбор источников."
-        )
+        titles = self.titles[:self.max_items] if self.max_items else self.titles
+        for t in titles:
+            try:
+                text = self._summary(t)
+            except Exception as e:                       # сеть/404 — пропуск, не падаем
+                print(f"  [web:{t}] ошибка загрузки: {e}")
+                continue
+            if text and len(text) > 40:
+                yield f"web:{t}", text
 
 
 def learn_loop(learner, acquirer, model=DEFAULT_MODEL, max_items=None, verbose=True):

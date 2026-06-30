@@ -404,6 +404,12 @@ class TestKnowledgeManager(unittest.TestCase):
         names = [n for n, _ in LocalAcquirer(self.wd)]
         self.assertEqual(names, ["1_a.txt", "1_aa.txt", "2_b.txt", "10_c.txt"])
 
+    def test_web_acquirer_enforces_allowlist(self):
+        from autolearn import WebAcquirer
+        WebAcquirer(["Atom"], lang="simple")            # разрешённый источник — ок
+        with self.assertRaises(ValueError):
+            WebAcquirer(["Atom"], lang="evil")          # вне allowlist → отказ
+
 
 class TestStructuralPredictor(unittest.TestCase):
     """Аналогия по структуре + подтверждение перед материализацией."""
