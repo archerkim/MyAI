@@ -55,6 +55,43 @@ def _is_valid_concept(concept):
         return False  # «matter_transfer_no», «cannot_be_created» — протёкшее отрицание
     return True
 
+
+# --- детерминированная канонизация концептов (склейка ед./мн.) ---
+# Узлы C-ядра ключуются по строке-лемме, а 7B-модель не нормализует множественное
+# число: 'atom' и 'atoms' становятся РАЗНЫМИ узлами и дробят граф. Сингуляризуем
+# головное (последнее) слово snake_case-концепта правилами английского — без LLM.
+
+# Слова, оканчивающиеся на 's', но НЕ множественные / неисчисляемые: не трогаем.
+_KEEP_AS_IS = frozenset({
+    "physics", "mathematics", "mechanics", "statistics", "dynamics", "optics",
+    "news", "species", "series", "mass", "gas", "glass", "class", "lens",
+    "apparatus", "status", "nucleus", "radius", "focus", "basis", "axis",
+    "analysis", "crisis", "process", "stress",
+})
+
+
+def _singularize(w):
+    """Грубая, но безопасная для физики сингуляризация одного слова."""
+    if len(w) <= 3 or w in _KEEP_AS_IS:
+        return w
+    if w.endswith(("ss", "us", "is", "ous")):
+        return w                       # mass, nucleus, axis, porous
+    if w.endswith("ies"):
+        return w[:-3] + "y"            # properties -> property
+    if w.endswith(("ses", "xes", "zes", "ches", "shes")):
+        return w[:-2]                  # gases -> gas, boxes -> box
+    if w.endswith("s"):
+        return w[:-1]                  # atoms -> atom, charges -> charge
+    return w
+
+
+def _canonicalize_concept(concept):
+    """lowercase + сингуляризация головного слова. 'Oxygen_Atoms' -> 'oxygen_atom'."""
+    parts = concept.strip().lower().split("_")
+    if parts and parts[-1]:
+        parts[-1] = _singularize(parts[-1])
+    return "_".join(p for p in parts if p)
+
 # --- модель данных для structured outputs ---
 # Динамически строим Enum из единого источника правды (RELATION_TYPE_MAP),
 # чтобы LLM была ограничена ровно теми отношениями, что знает C-ядро.
@@ -202,8 +239,13 @@ def _run_extraction(client, model, user_content, strict):
         ) from e
 
     extraction = Extraction.model_validate_json(response.message.content)
+    # канонизация ВСЕГДА (склейка ед./мн.), фильтрация — опционально
     triples = [
-        {"subject": t.subject, "relation": t.relation.value, "object": t.object}
+        {
+            "subject": _canonicalize_concept(t.subject),
+            "relation": t.relation.value,
+            "object": _canonicalize_concept(t.object),
+        }
         for t in extraction.triples
     ]
 
