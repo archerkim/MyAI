@@ -572,11 +572,17 @@ size_t brain_get_significant_nodes(BrainHandle handle, size_t max_results_size, 
     // --- шаг 2: сортируем активные узлы по убыванию активации ---
     qsort(active_nodes, active_count, sizeof(ActivatedNode), compare_activated_nodes);
 
-    // --- шаг 3: ищем самый большой "обрыв" (максимальную разницу) ---
+    // --- шаг 3: ищем самый большой "обрыв" (максимальную разницу) В ХВОСТЕ ---
+    // ВАЖНО: поиск начинается с index 1, а не 0. Узлы-якоря держатся на ~1.0
+    // (anchor_boost), а распространённая активация соседей на порядок меньше
+    // (~0.1), поэтому самый большой перепад ВСЕГДА между якорем и остальными —
+    // и наивный поиск с index 0 возвращал бы только сам якорь. Пропуская верхний
+    // узел(ы), мы находим естественный обрыв среди РАСПРОСТРАНЁННОГО облака и
+    // всегда включаем якорь + значимых соседей.
     float max_delta = -1.0f;
-    size_t cut_off_index = 0; // индекс, ПОСЛЕ которого происходит обрыв
+    size_t cut_off_index = active_count - 1; // по умолчанию — оставить все активные
 
-    for (size_t i = 0; i < active_count - 1; ++i) {
+    for (size_t i = 1; i + 1 < active_count; ++i) {
         float current_delta = active_nodes[i].activation - active_nodes[i+1].activation;
         if (current_delta > max_delta) {
             max_delta = current_delta;
