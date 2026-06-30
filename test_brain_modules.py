@@ -442,5 +442,44 @@ class TestReflection(unittest.TestCase):
         self.assertEqual(conv[("a", "is_a", "d")].witnesses, frozenset({"b", "c"}))
 
 
+class TestEffectiveness(unittest.TestCase):
+    """Скоркарта эффективности системы (детерминированно, без LLM)."""
+
+    FACTS = {
+        ("whale", "is_a", "mammal"),
+        ("mammal", "is_a", "animal"),
+        ("animal", "has_property", "needs_oxygen"),
+    }
+    SRC = {
+        ("whale", "is_a", "mammal"): {1},
+        ("mammal", "is_a", "animal"): {1},
+        ("animal", "has_property", "needs_oxygen"): {2},
+    }
+
+    def test_scorecard_axes_in_unit_range(self):
+        from effectiveness import evaluate, _WEIGHTS
+        rep = evaluate(self.FACTS, self.SRC)
+        self.assertAlmostEqual(sum(_WEIGHTS.values()), 1.0, places=6)
+        for k, v in rep["subscores"].items():
+            self.assertGreaterEqual(v, 0.0, k)
+            self.assertLessEqual(v, 1.0, k)
+        self.assertGreaterEqual(rep["composite"], 0.0)
+        self.assertLessEqual(rep["composite"], 1.0)
+
+    def test_sound_grounded_emergent_on_clean_cross_source(self):
+        from effectiveness import evaluate
+        rep = evaluate(self.FACTS, self.SRC)
+        # чистый кросс-источниковый граф: выводы корректны, заземлены, эмерджентны
+        self.assertEqual(rep["subscores"]["soundness"], 1.0)
+        self.assertEqual(rep["subscores"]["groundedness"], 1.0)
+        self.assertGreater(rep["subscores"]["emergence"], 0.0)
+
+    def test_single_source_kills_emergence(self):
+        from effectiveness import evaluate
+        one = {t: {1} for t in self.FACTS}
+        rep = evaluate(self.FACTS, one)
+        self.assertEqual(rep["subscores"]["emergence"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
