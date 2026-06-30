@@ -330,6 +330,26 @@ class TestCurriculum(unittest.TestCase):
         self.assertEqual(set(order), {"a", "b"})
 
 
+class TestSynonyms(unittest.TestCase):
+    """Языковой слой: синонимы схлопываются к канону → факты выравниваются."""
+
+    def test_synonyms_map_to_canon(self):
+        from synonyms import normalize_concept
+        self.assertEqual(normalize_concept("jiggling"), "motion")
+        self.assertEqual(normalize_concept("atomic_motion"), "motion")
+        self.assertEqual(normalize_concept("everything"), "matter")
+
+    def test_singular_plural_still_applies(self):
+        from synonyms import normalize_concept
+        self.assertEqual(normalize_concept("atoms"), "atom")  # дедуп до синонимов
+
+    def test_equivalent_facts_align(self):
+        from synonyms import normalize_triple
+        a = normalize_triple(("atom", "has_property", "jiggling"))
+        b = normalize_triple(("atom", "has_property", "motion"))
+        self.assertEqual(a, b)  # разные формулировки → один факт → корроборация
+
+
 class TestStructuralPredictor(unittest.TestCase):
     """Аналогия по структуре + подтверждение перед материализацией."""
 
