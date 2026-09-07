@@ -221,4 +221,4 @@ mind/                                the knowledge workspace (gitignored)
 
 ---
 
-Author: **Artur Kim**. Research context: Cambria group, NTU CCDS.
+Author: **Artur Kim**.
